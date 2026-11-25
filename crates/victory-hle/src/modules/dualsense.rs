@@ -288,7 +288,11 @@ fn device_paths() -> Vec<Vec<u16>> {
             len += 1;
         }
         // SAFETY: `path` is valid for `len` u16s in the live buffer.
-        paths.push(unsafe { std::slice::from_raw_parts(path, len) }.to_vec());
+        let mut path = unsafe { std::slice::from_raw_parts(path, len) }.to_vec();
+        // `CreateFileW` reads the path up to its NUL: without one it read
+        // past the copy, and crashed when the copy ended a heap page.
+        path.push(0);
+        paths.push(path);
     }
     // SAFETY: the set is ours.
     unsafe { SetupDiDestroyDeviceInfoList(set) };
@@ -478,6 +482,16 @@ mod tests {
         assert!(!input_report(&[]));
     }
 
+    /// Each path ends in the one NUL `CreateFileW` reads up to (there may
+    /// be no HID interfaces on the host, and then nothing to check).
+    #[test]
+    fn device_paths_end_in_a_nul() {
+        for path in device_paths() {
+            assert_eq!(path.last(), Some(&0), "{}", String::from_utf16_lossy(&path));
+            assert!(!path[..path.len() - 1].contains(&0));
+        }
+    }
+
     /// Not part of the suite: prints what the HID scan sees on this machine.
     /// `cargo test -p victory-hle --lib dualsense -- --ignored --nocapture`
     #[test]
@@ -486,7 +500,7 @@ mod tests {
         let paths = device_paths();
         println!("hid interfaces: {}", paths.len());
         for path in &paths {
-            println!("  {}", String::from_utf16_lossy(path));
+            println!("  {}", String::from_utf16_lossy(&path[..path.len() - 1]));
         }
         match open_pad() {
             Some(pad) => println!("opened a DualSense: report length {}", pad.input_len),
