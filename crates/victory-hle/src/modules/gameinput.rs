@@ -1267,42 +1267,55 @@ mod host {
     }
 
     /// Debugging aid: keys as in `VICTORY_KEYS`, one per line of the file
-    /// `VICTORY_KEYS_FILE`, each held for 0.2 s once its line is there.
+    /// `VICTORY_KEYS_FILE`, held once its line is there: 0.2 s, or as many
+    /// milliseconds as follow the key (`W 1500`); keys joined by `+` are
+    /// held together (`W+Z 2000`). 0.4 s of nothing follows each line.
     #[cfg(feature = "diagnostics")]
-    fn asked() -> Option<u8> {
+    fn asked() -> Vec<u8> {
         struct Asked {
             looked: Instant,
             done: usize,
-            held: Option<(Instant, u8)>,
+            held: Option<(Instant, Duration, Vec<u8>)>,
         }
         static ASKED: LazyLock<std::sync::Mutex<Asked>> = LazyLock::new(|| {
             std::sync::Mutex::new(Asked { looked: Instant::now(), done: 0, held: None })
         });
         static FILE: LazyLock<Option<std::ffi::OsString>> =
             LazyLock::new(|| std::env::var_os("VICTORY_KEYS_FILE"));
-        let file = FILE.as_ref()?;
+        let Some(file) = FILE.as_ref() else {
+            return Vec::new();
+        };
         let mut a = ASKED.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        if let Some((since, vk)) = a.held {
-            let age = now - since;
-            if age < Duration::from_millis(200) {
-                return Some(vk);
+        if let Some((since, hold, keys)) = &a.held {
+            let age = now - *since;
+            if age < *hold {
+                return keys.clone();
             }
-            if age < Duration::from_millis(600) {
-                return None;
+            if age < *hold + Duration::from_millis(400) {
+                return Vec::new();
             }
             a.held = None;
         }
         if now - a.looked < Duration::from_millis(100) {
-            return None;
+            return Vec::new();
         }
         a.looked = now;
-        let lines = std::fs::read_to_string(file).ok()?;
-        let name = lines.lines().nth(a.done)?.trim().to_owned();
+        let Ok(lines) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        let Some(line) = lines.lines().nth(a.done).map(|l| l.trim().to_owned()) else {
+            return Vec::new();
+        };
         a.done += 1;
-        tracing::info!(key = name, "a key was asked for");
-        a.held = key_named(&name).map(|vk| (now, vk));
-        a.held.map(|h| h.1)
+        let (names, ms) = match line.split_once(char::is_whitespace) {
+            Some((names, ms)) => (names, ms.trim().parse().unwrap_or(200)),
+            None => (line.as_str(), 200),
+        };
+        let keys: Vec<u8> = names.split('+').filter_map(|n| key_named(n.trim())).collect();
+        tracing::info!(key = line, "a key was asked for");
+        a.held = Some((now, Duration::from_millis(ms), keys.clone()));
+        keys
     }
 
     /// The foreground window is one of ours (the title's or our fallback).
